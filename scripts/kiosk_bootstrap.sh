@@ -28,13 +28,15 @@ sudo apt install -y \
   tigervnc-standalone-server \
   unclutter
 
-if [ ! -f "$HOME/.vnc/passwd" ]; then
+# Old tigervnc writes to ~/.vnc/passwd; newer (Trixie) writes to
+# ~/.config/tigervnc/passwd (XDG). Accept either.
+if [ ! -f "$HOME/.vnc/passwd" ] && [ ! -f "$HOME/.config/tigervnc/passwd" ]; then
   echo "==> no VNC password set yet — running vncpasswd"
   echo "    (pick something you'll remember; view-only password is optional)"
-  mkdir -p "$HOME/.vnc"
+  mkdir -p "$HOME/.vnc" "$HOME/.config/tigervnc"
   vncpasswd
 else
-  echo "==> VNC password already exists at ~/.vnc/passwd, skipping"
+  echo "==> VNC password already set, skipping"
 fi
 
 cat <<EOF
