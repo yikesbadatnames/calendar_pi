@@ -11,15 +11,29 @@ set -euo pipefail
 DEFAULT_URL='https://calendar.google.com/calendar/embed?src=en.usa%23holiday%40group.v.calendar.google.com&ctz=America%2FLos_Angeles&mode=MONTH'
 KIOSK_URL="${1:-$DEFAULT_URL}"
 
-# Older Raspberry Pi OS (Bookworm) ships /usr/bin/chromium-browser; newer
-# (Trixie) ships /usr/bin/chromium. Detect whichever exists.
-CHROMIUM=$(command -v chromium-browser || command -v chromium || true)
-if [ -z "$CHROMIUM" ]; then
-  echo "error: neither 'chromium-browser' nor 'chromium' found in PATH" >&2
+# Prefer Epiphany (WebKit, ~1/3 Chromium's RAM) since the Pi Zero 2 W only has
+# 512 MB. Fall back to Chromium if Epiphany isn't installed (e.g. running on a
+# beefier Pi where Chromium fits).
+BROWSER_BIN=""
+BROWSER_ARGS=()
+if command -v epiphany-browser >/dev/null; then
+  BROWSER_BIN=$(command -v epiphany-browser)
+  # --application-mode = chromeless single-window (like Chrome's --app).
+  # --profile keeps state out of the user's default profile so restarts are clean.
+  BROWSER_ARGS=(--application-mode "--profile=$HOME/.local/share/kiosk-profile")
+  mkdir -p "$HOME/.local/share/kiosk-profile"
+elif command -v chromium-browser >/dev/null; then
+  BROWSER_BIN=$(command -v chromium-browser)
+  BROWSER_ARGS=(--kiosk --noerrdialogs --disable-infobars --incognito=false --no-first-run)
+elif command -v chromium >/dev/null; then
+  BROWSER_BIN=$(command -v chromium)
+  BROWSER_ARGS=(--kiosk --noerrdialogs --disable-infobars --incognito=false --no-first-run)
+else
+  echo "error: no supported browser found (epiphany-browser, chromium-browser, or chromium)" >&2
   echo "did kiosk_bootstrap.sh finish successfully?" >&2
   exit 1
 fi
-echo "==> chromium binary: $CHROMIUM"
+echo "==> browser: $BROWSER_BIN"
 
 echo "==> stopping any existing vncserver on :1"
 vncserver -kill :1 >/dev/null 2>&1 || true
@@ -29,18 +43,20 @@ vncserver -kill :1 >/dev/null 2>&1 || true
 echo "==> writing xstartup pointed at:"
 echo "    $KIOSK_URL"
 mkdir -p "$HOME/.vnc" "$HOME/.config/tigervnc"
+
+# Build the browser command line, quoting each arg safely for the shell script.
+BROWSER_CMD="$BROWSER_BIN"
+for arg in "${BROWSER_ARGS[@]}"; do
+  BROWSER_CMD="$BROWSER_CMD '$arg'"
+done
+BROWSER_CMD="$BROWSER_CMD '$KIOSK_URL'"
+
 XSTARTUP_BODY=$(cat <<EOF
 #!/bin/sh
 xsetroot -solid black &
 openbox-session &
 unclutter -idle 0.1 &
-exec $CHROMIUM \\
-  --kiosk \\
-  --noerrdialogs \\
-  --disable-infobars \\
-  --incognito=false \\
-  --no-first-run \\
-  "$KIOSK_URL"
+exec $BROWSER_CMD
 EOF
 )
 printf '%s\n' "$XSTARTUP_BODY" > "$HOME/.vnc/xstartup"
