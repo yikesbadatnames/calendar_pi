@@ -1,4 +1,8 @@
-# Google OAuth secrets — never commit
+# Calendar auth material — never commit.
+# config.json holds the secret ICS URL (current MVP route).
+# credentials.json + token.json are the OAuth pair (unused for now; kept
+# in case we ever pivot back to the Calendar API route).
+service/config.json
 service/credentials.json
 service/token.json
 

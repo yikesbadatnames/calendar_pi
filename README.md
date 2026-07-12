@@ -26,9 +26,9 @@ Each button wires one leg to its GPIO pin and the other leg to a ground pin (e.g
 
 - **OS**: Raspberry Pi OS Lite (Trixie, 64-bit) — Debian 13-based, not Bookworm as originally planned.
 - **Display**: minimal X session (TigerVNC virtual display for dev, physical HDMI when the display situation is sorted) + openbox as the window manager.
-- **App**: single Python program that talks to the Google Calendar API and renders the calendar itself with `tkinter` (or `pygame` — TBD). No browser involved.
-- **Auth**: OAuth 2.0 installed-app flow. `credentials.json` from Google Cloud Console, `token.json` generated once and refreshed automatically thereafter.
-- **Button handling**: same Python program (or a sibling module) using `gpiozero` on GPIO 17/27/22. Buttons call `state.next_month()` / `state.toggle_view()` etc. directly — no browser to drive.
+- **App**: single Python program that fetches the calendar's secret ICS feed and renders it with `tkinter`. No browser involved.
+- **Auth**: secret ICS URL from Google Calendar (Settings → Integrate calendar → "Secret address in iCal format"), stored in `service/config.json` (gitignored). No OAuth.
+- **Button handling**: same Python program using `gpiozero` on GPIO 17/27/22. Buttons call `app.next_month()` / `app.toggle_view()` etc. directly — no browser to drive.
 
 ## Why not a browser?
 
@@ -39,25 +39,29 @@ Original plan was Chromium in kiosk mode pointed at Google Calendar's embed. Rul
 
 The pragmatic pivot: skip the browser entirely, own the rendering pipeline in Python. Way lighter (~20 MB vs ~300 MB), cleaner button integration (direct function calls, no fake keyboard events), and total UI control.
 
-## Why the API instead of the ICS feed?
+## Why the ICS feed (for now) instead of the API?
 
-We considered the ICS feed (public/secret URL that returns the calendar in iCalendar format) — simpler setup, no OAuth. Chose the full Google Calendar API instead because:
+Original plan was the full Google Calendar API. Started the OAuth setup (Google Cloud project, Calendar API enable, consent screen, Desktop OAuth client) and pivoted mid-flow. Reasons for backing out:
 
-- We want auto-refresh in near-real-time (push notifications via webhooks, or short-interval polling that's rate-limit-friendly). ICS is poll-only and Google doesn't guarantee freshness on the feed.
-- Room to grow later — writing events back, reading multiple calendars with distinct colors, richer event metadata.
-- The migration cost from ICS → API later would be small in code (fetch layer is ~30 lines), but the setup churn is annoying to do twice.
+- **Setup pain is disproportionate** to what a personal kiosk needs. Consent screens, publishing status, testing-mode token expiry, downloading `credentials.json`, running a browser-based auth helper, `scp`'ing `token.json`. A lot of ceremony for "show me my events."
+- **A poll-only ICS feed is fine here.** Google's ICS endpoint can lag some minutes-to-hours behind the source, but for a glanceable kiosk that's plenty fresh at a 60-second refetch cadence.
+- **Fetch layer is ~30 lines either way.** If we outgrow ICS (e.g. want multi-color merged calendars written back), swapping in the API is a contained change, not a rewrite.
+
+What we lose vs the API:
+- Near-real-time push notifications via webhooks.
+- Writing events back / multi-calendar with distinct colors from a single auth (multi-calendar over ICS is possible — just add another URL to the config).
 
 ## High-Level Flow
 
 1. Pi boots straight into a virtual X session (dev: viewed over VNC from the Mac; final: driven to HDMI).
 2. Openbox launches; our Python program launches fullscreen inside it.
 3. Python program:
-   - Loads `token.json`, refreshes access token as needed.
-   - Fetches events from the Google Calendar API for the currently-anchored month/week.
-   - Draws the calendar (month grid or week view).
+   - Loads the secret ICS URL from `service/config.json`.
+   - Fetches the ICS payload, parses it (including expanding recurring events).
+   - Draws the current month (week view TBD).
    - Watches GPIO 17/27/22 via `gpiozero`.
-4. Button presses mutate view state (`view = "week"`, `anchor += one_month`, etc.) → trigger a redraw.
-5. Background task re-fetches events on a schedule (or via push webhooks later) so the display stays fresh without user action.
+4. Button presses mutate view state (`anchor -= one_month`, `anchor += one_month`, etc.) → trigger a redraw.
+5. Background timer re-fetches every 60 s so the display stays fresh without user action.
 
 ## Setup Outline
 
@@ -67,20 +71,25 @@ We considered the ICS feed (public/secret URL that returns the calendar in iCale
 2. **First boot** ✅ done
    - SSH in, `sudo apt update && sudo apt full-upgrade`.
 3. **Base Python + GPIO** ✅ done
-   - `bash scripts/pi_bootstrap.sh` on the Pi. Installs `python3-venv python3-gpiozero python3-lgpio`, creates `~/calendar_pi/.venv` with `--system-site-packages`.
+   - `bash scripts/pi_bootstrap.sh` on the Pi. Installs `python3-venv python3-gpiozero python3-lgpio python3-tk`, creates `~/calendar_pi/.venv` with `--system-site-packages`, pip-installs `requests icalendar recurring-ical-events` into it.
+   - **Re-run this** if you set the Pi up before the ICS pivot — it now installs the new deps.
 4. **X + VNC dev environment** ✅ done
    - `bash scripts/kiosk_bootstrap.sh` on the Pi. Installs `xserver-xorg xinit x11-xserver-utils openbox tigervnc-standalone-server unclutter wmctrl` (and `epiphany-browser`, which is now unused but harmless).
-   - `bash scripts/kiosk_start.sh` starts a virtual X session on display `:1`, port `5901`. See "Kiosk dev mode (VNC)" below. This currently still launches Epiphany because we haven't swapped it for the Python renderer yet — that's the next step.
-5. **Google Cloud + OAuth (next up)** ⏳
-   - Create a Google Cloud project, enable Google Calendar API, create OAuth 2.0 client credentials (type: "Desktop app"), download `credentials.json`.
-   - Note: if you leave the OAuth consent screen in "Testing" mode, refresh tokens expire every 7 days. Publish the app (mostly a formality for personal use) to avoid that.
-   - Run a one-time auth helper on the Mac that opens a browser, does the consent flow, and writes `token.json`. `scp token.json cal-pi:~/calendar_pi/service/`.
-6. **Python calendar app (next up)** ⏳
-   - `service/calendar_client.py` — loads `credentials.json` + `token.json`, calls the Calendar API, returns events for a date range. Auto-refreshes access tokens.
-   - `service/renderer.py` — draws a month/week view of the events. `tkinter` first (already in the stdlib), consider `pygame` only if we hit rendering limits.
-   - `service/main.py` — main loop. Holds view state (`view`, `anchor_date`). Kicks off periodic re-fetches. Wires GPIO buttons to state mutations + redraws.
-7. **Swap kiosk_start.sh** ⏳
-   - Change xstartup to launch the Python app instead of Epiphany (drop `wmctrl` fullscreen dance; Tk/pygame can go fullscreen natively).
+   - `bash scripts/kiosk_start.sh` starts a virtual X session on display `:1`, port `5901`. See "Kiosk dev mode (VNC)" below. Now launches the Python app directly.
+5. **Get the secret ICS URL** ⏳
+   - In Google Calendar (web): sidebar → hover primary calendar → ⋮ → **Settings and sharing** → **Integrate calendar** → copy **Secret address in iCal format**.
+   - Guard it like a password (anyone with the URL can read the calendar).
+   - Save it in `service/config.json`:
+     ```json
+     { "ics_url": "https://calendar.google.com/calendar/ical/.../basic.ics" }
+     ```
+   - The file is gitignored.
+6. **Python calendar app** ✅ scaffolded
+   - `service/calendar_client.py` — reads `config.json`, fetches the ICS URL, expands recurring events, returns events for a date range.
+   - `service/renderer.py` — tkinter month grid with event titles in each day cell.
+   - `service/main.py` — main loop. Holds view state (`anchor_date`). 60 s refetch via `root.after`. Wires GPIO buttons to state mutations + redraws.
+7. **Swap kiosk_start.sh** ✅ done
+   - xstartup now execs the Python app directly. Dropped browser detection + `wmctrl` fullscreen dance (tkinter goes fullscreen natively).
 8. **Physical display + autostart** ⏳ (blocked on HDMI cable/adapter — see Ongoing Issues)
    - Add `~/.xinitrc` + `systemd` unit that starts the X session on boot without VNC.
 9. **Wiring the buttons** ⏳
@@ -102,8 +111,7 @@ bash scripts/kiosk_bootstrap.sh   # installs X + openbox + tigervnc + wmctrl (+ 
 On the Pi (each time you want to (re)start the session):
 
 ```
-bash scripts/kiosk_start.sh       # currently launches Epiphany — will be swapped
-                                  # for the Python calendar app once it exists
+bash scripts/kiosk_start.sh       # launches the Python calendar app fullscreen
 ```
 
 On the Mac: Finder → Go → Connect to Server → `vnc://cal-pi.local:5901`.
@@ -124,9 +132,11 @@ calendar_pi/
                         # plan. Empty; likely deleted once the browser-free plan lands.
 ```
 
-Auth secrets — `service/credentials.json` and `service/token.json` — will
-live in `service/` locally. Both are gitignored (or should be) before any
-commits go up. Never commit either.
+Auth material — `service/config.json` (the secret ICS URL) — lives in
+`service/` locally. Gitignored. Never commit.
+
+`service/credentials.json` and `service/token.json` are also in `.gitignore`
+in case the API route ever comes back on the menu; currently unused.
 
 ## Status
 
@@ -139,10 +149,11 @@ commits go up. Never commit either.
 - ✅ VNC dev environment working — Mac can connect to `vnc://cal-pi.local:5901` and see the Pi's virtual X session
 - ❌ **Ruled out**: Chromium in kiosk mode — OOMs on 512 MB
 - ❌ **Ruled out**: Epiphany as a browser kiosk — `--application-mode` is a dead end without the full web-app ceremony; runtime "page unresponsive" on the calendar embed under VNC (no GPU accel)
-- ✅ **Decision made**: build a native Python renderer using the Google Calendar API instead of any browser
-- ⏳ Next: Google Cloud project + OAuth `credentials.json` + first-time auth to produce `token.json`
-- ⏳ Then: write `service/calendar_client.py`, `service/renderer.py`, `service/main.py`
-- ⏳ Then: swap `kiosk_start.sh` xstartup to launch the Python app instead of Epiphany
+- ✅ **Decision made**: build a native Python renderer, fetching the calendar as an ICS feed
+- ✅ Started but pivoted away from OAuth: Google Cloud project + Calendar API + Desktop OAuth client exist and are inert. Cheaper to just consume the secret ICS URL.
+- ✅ Python app scaffolded: `service/calendar_client.py`, `service/renderer.py`, `service/main.py`
+- ✅ `scripts/kiosk_start.sh` swapped to launch the Python app directly
+- ⏳ Next: drop the secret ICS URL into `service/config.json`, re-run `pi_bootstrap.sh` on the Pi for the new deps, `scp` config across, and launch over VNC
 - ⏳ In parallel: wire the three buttons on the breadboard and run `python service/button_test.py`
 - ⏳ Blocked on **final** kiosk display (USB-C-only monitor mismatch — see Ongoing Issues); dev work is not blocked
 
