@@ -52,11 +52,36 @@ Each button wires one leg to its GPIO pin and the other leg to a ground pin (e.g
 4. **Kiosk autostart**
    - `~/.xinitrc` launches Chromium with `--kiosk --noerrdialogs --disable-infobars --incognito=false`.
    - `systemd` unit starts `startx` on boot.
+   - Interim (before the final HDMI display is sorted): run the kiosk under a virtual X display over VNC — see "Kiosk dev mode (VNC)" below.
 5. **Button service**
    - Python venv with `gpiozero`.
    - `systemd` unit runs the button daemon; it talks to the kiosk page over a local WebSocket (or fires xdotool key events).
 6. **Wiring**
    - Prototype on the breadboard with jumpers first, then solder to a small perfboard once the layout is confirmed.
+
+## Kiosk dev mode (VNC)
+
+Prove the kiosk software stack (Chromium + Google Calendar embed) without
+needing the final HDMI display. The Pi runs a virtual X session; the Mac
+views it over VNC.
+
+On the Pi (once, after `pi_bootstrap.sh`):
+
+```
+bash scripts/kiosk_bootstrap.sh   # installs X + openbox + chromium + tigervnc + unclutter
+                                  # prompts once for a VNC password
+```
+
+On the Pi (each time you want to (re)start the kiosk):
+
+```
+bash scripts/kiosk_start.sh                       # defaults to US Holidays public calendar
+bash scripts/kiosk_start.sh 'https://.../embed?…' # or pass your own URL
+```
+
+On the Mac: Finder → Go → Connect to Server → `vnc://cal-pi.local:5901`.
+
+Stop with `vncserver -kill :1`. Logs land in `~/.vnc/*.log`.
 
 ## Repo Layout (planned)
 
@@ -75,8 +100,11 @@ calendar_pi/
 - ✅ Pi on Wi-Fi, SSH working from the Mac over the home network
 - ✅ OS updated (`apt update && apt full-upgrade`), Python 3 confirmed available
 - ✅ Repo scaffolded: `service/button_test.py`, `scripts/pi_bootstrap.sh`, empty `kiosk/` and `systemd/`
-- ⏳ Next: clone the repo on the Pi, run `bash scripts/pi_bootstrap.sh`, wire the three buttons on the breadboard, then run `python service/button_test.py` and confirm each press prints its label
-- ⏳ Blocked on final kiosk display (USB-C-only monitor mismatch — see Ongoing Issues)
+- ✅ `pi_bootstrap.sh` run on the Pi (venv + gpiozero ready)
+- ✅ Kiosk dev-mode scaffolded: `scripts/kiosk_bootstrap.sh`, `scripts/kiosk_start.sh`
+- ⏳ Next: run the kiosk bootstrap + start scripts on the Pi, connect over VNC from the Mac, confirm Google Calendar's embed renders in Chromium
+- ⏳ In parallel: wire the three buttons on the breadboard and run `python service/button_test.py`
+- ⏳ Blocked on **final** kiosk display (USB-C-only monitor mismatch — see Ongoing Issues); dev work is not blocked
 
 ## Ongoing Issues
 
