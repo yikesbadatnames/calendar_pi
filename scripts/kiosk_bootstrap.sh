@@ -24,6 +24,8 @@ echo "==> installing display + VNC + browser stack"
 # tigervnc-standalone-server: runs a virtual X display (not RealVNC's shared-desktop model).
 # unclutter: hides the mouse cursor when idle.
 # epiphany-browser: WebKit-based, ~1/3 the memory of Chromium.
+# wmctrl: sends fullscreen command to the browser window after it opens
+#        (Epiphany has no --kiosk equivalent, so we drive it externally).
 sudo apt install -y \
   xserver-xorg \
   xinit \
@@ -31,7 +33,8 @@ sudo apt install -y \
   openbox \
   epiphany-browser \
   tigervnc-standalone-server \
-  unclutter
+  unclutter \
+  wmctrl
 
 # Old tigervnc writes to ~/.vnc/passwd; newer (Trixie) writes to
 # ~/.config/tigervnc/passwd (XDG). Accept either.

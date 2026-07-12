@@ -18,12 +18,12 @@ BROWSER_BIN=""
 BROWSER_ARGS=()
 if command -v epiphany-browser >/dev/null; then
   BROWSER_BIN=$(command -v epiphany-browser)
-  # Epiphany's --application-mode requires the profile directory basename to
-  # start with 'org.gnome.Epiphany.WebApp_' — that's how it derives a
-  # GApplication ID. Anything else fails with a hard g_error() at startup.
-  EPIPHANY_PROFILE="$HOME/.local/share/org.gnome.Epiphany.WebApp_calendar"
-  BROWSER_ARGS=(--application-mode "--profile=$EPIPHANY_PROFILE")
-  mkdir -p "$EPIPHANY_PROFILE"
+  # Epiphany has no --kiosk flag. --application-mode looks promising but
+  # requires a full "web app" ceremony (matching profile dir prefix + a
+  # .desktop file + icons); missing pieces cause hard g_error() aborts.
+  # Simpler and more reliable: run --incognito (no profile), then use wmctrl
+  # after launch to send the window fullscreen. See xstartup below.
+  BROWSER_ARGS=(--incognito)
 elif command -v chromium-browser >/dev/null; then
   BROWSER_BIN=$(command -v chromium-browser)
   BROWSER_ARGS=(--kiosk --noerrdialogs --disable-infobars --incognito=false --no-first-run)
@@ -58,6 +58,17 @@ XSTARTUP_BODY=$(cat <<EOF
 xsetroot -solid black &
 openbox-session &
 unclutter -idle 0.1 &
+# Give the browser a few seconds to open its window, then fullscreen it.
+# Loop for a while in case initial GTK/WebKit startup is slow on the Pi Zero.
+(
+  for i in \$(seq 1 20); do
+    sleep 1
+    if wmctrl -l 2>/dev/null | grep -qi epiphany; then
+      wmctrl -r Epiphany -b add,fullscreen
+      break
+    fi
+  done
+) &
 exec $BROWSER_CMD
 EOF
 )
