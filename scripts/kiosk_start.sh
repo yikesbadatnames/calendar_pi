@@ -18,10 +18,12 @@ BROWSER_BIN=""
 BROWSER_ARGS=()
 if command -v epiphany-browser >/dev/null; then
   BROWSER_BIN=$(command -v epiphany-browser)
-  # --application-mode = chromeless single-window (like Chrome's --app).
-  # --profile keeps state out of the user's default profile so restarts are clean.
-  BROWSER_ARGS=(--application-mode "--profile=$HOME/.local/share/kiosk-profile")
-  mkdir -p "$HOME/.local/share/kiosk-profile"
+  # Epiphany's --application-mode requires the profile directory basename to
+  # start with 'org.gnome.Epiphany.WebApp_' — that's how it derives a
+  # GApplication ID. Anything else fails with a hard g_error() at startup.
+  EPIPHANY_PROFILE="$HOME/.local/share/org.gnome.Epiphany.WebApp_calendar"
+  BROWSER_ARGS=(--application-mode "--profile=$EPIPHANY_PROFILE")
+  mkdir -p "$EPIPHANY_PROFILE"
 elif command -v chromium-browser >/dev/null; then
   BROWSER_BIN=$(command -v chromium-browser)
   BROWSER_ARGS=(--kiosk --noerrdialogs --disable-infobars --incognito=false --no-first-run)
