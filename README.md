@@ -42,7 +42,7 @@ Each button wires one leg to its GPIO pin and the other leg to a ground pin (e.g
 
 1. **Flash SD card**
    - Use Raspberry Pi Imager on the Mac to write Raspberry Pi OS Lite.
-   - Pre-configure Wi-Fi, hostname (`calendar-pi`), SSH, and user in Imager's advanced settings.
+   - Pre-configure Wi-Fi, hostname (`cal-pi`), SSH, and user in Imager's advanced settings.
 2. **First boot**
    - SSH in, run `sudo apt update && sudo apt full-upgrade`.
    - Install the desktop bits needed for kiosk (`xserver-xorg`, `x11-xserver-utils`, `xinit`, `chromium-browser`, `unclutter`).
@@ -74,7 +74,8 @@ calendar_pi/
 - ✅ Pi Zero 2 WH flashed with Raspberry Pi OS Lite (64-bit, Bookworm)
 - ✅ Pi on Wi-Fi, SSH working from the Mac over the home network
 - ✅ OS updated (`apt update && apt full-upgrade`), Python 3 confirmed available
-- ⏳ Next: clone this repo onto the Pi, start button-test script
+- ✅ Repo scaffolded: `service/button_test.py`, `scripts/pi_bootstrap.sh`, empty `kiosk/` and `systemd/`
+- ⏳ Next: clone the repo on the Pi, run `bash scripts/pi_bootstrap.sh`, wire the three buttons on the breadboard, then run `python service/button_test.py` and confirm each press prints its label
 - ⏳ Blocked on final kiosk display (USB-C-only monitor mismatch — see Ongoing Issues)
 
 ## Ongoing Issues
