@@ -21,9 +21,10 @@ if command -v epiphany-browser >/dev/null; then
   # Epiphany has no --kiosk flag. --application-mode looks promising but
   # requires a full "web app" ceremony (matching profile dir prefix + a
   # .desktop file + icons); missing pieces cause hard g_error() aborts.
-  # Simpler and more reliable: run --incognito (no profile), then use wmctrl
-  # after launch to send the window fullscreen. See xstartup below.
-  BROWSER_ARGS=(--incognito)
+  # Simpler and more reliable: run --incognito-mode (no profile), then use
+  # wmctrl after launch to send the window fullscreen. See xstartup below.
+  # NB: it's --incognito-mode, not --incognito (that's Chrome's name).
+  BROWSER_ARGS=(--incognito-mode)
 elif command -v chromium-browser >/dev/null; then
   BROWSER_BIN=$(command -v chromium-browser)
   BROWSER_ARGS=(--kiosk --noerrdialogs --disable-infobars --incognito=false --no-first-run)
