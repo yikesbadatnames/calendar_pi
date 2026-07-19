@@ -28,7 +28,7 @@ Each button wires one leg to its GPIO pin and the other leg to a ground pin (e.g
 - **Display**: minimal X session (TigerVNC virtual display for dev, physical HDMI when the display situation is sorted) + openbox as the window manager.
 - **App**: single Python program that fetches the calendar's secret ICS feed and renders it with `tkinter`. No browser involved.
 - **Auth**: secret ICS URL from Google Calendar (Settings → Integrate calendar → "Secret address in iCal format"), stored in `service/config.json` (gitignored). No OAuth.
-- **Button handling**: same Python program using `gpiozero` on GPIO 17/27/22. Buttons call `app.next_month()` / `app.toggle_view()` etc. directly — no browser to drive.
+- **Button handling**: same Python program using `gpiozero` on GPIO 17/27/22. Buttons call `app.next_period()` / `app.prev_period()` / `app.toggle_view()` directly — no browser to drive. Keyboard bindings (`←` / `→` / `Space`) mirror the buttons so navigation is testable over VNC before the GPIO wiring exists.
 
 ## Why not a browser?
 
@@ -56,11 +56,11 @@ What we lose vs the API:
 1. Pi boots straight into a virtual X session (dev: viewed over VNC from the Mac; final: driven to HDMI).
 2. Openbox launches; our Python program launches fullscreen inside it.
 3. Python program:
-   - Loads the secret ICS URL from `service/config.json`.
-   - Fetches the ICS payload, parses it (including expanding recurring events).
-   - Draws the current month (week view TBD).
-   - Watches GPIO 17/27/22 via `gpiozero`.
-4. Button presses mutate view state (`anchor -= one_month`, `anchor += one_month`, etc.) → trigger a redraw.
+   - Loads calendar(s) from `service/config.json` — one or many ICS URLs, each with optional color, prefix, and email for organizer-based attribution.
+   - Fetches each ICS payload, expands recurring events, attributes shared events to the ORGANIZER's calendar, dedupes across feeds, sorts chronologically.
+   - Draws either the month grid (`MonthView`) or a Google-Calendar-style week view (`WeekView` — 7 day columns × hour rows, timed events as blocks sized by duration, all-day / multi-day events pinned to a header strip). Toggle button flips between them.
+   - Watches GPIO 17/27/22 via `gpiozero`; `←` / `→` / `Space` keyboard bindings mirror those for VNC dev.
+4. Button presses mutate view state (advance the anchor by one period — a month or a week depending on mode — or toggle the mode) → trigger a redraw. A ±3 month event cache means nav within the window is a pure redraw (no network).
 5. Background timer re-fetches every 60 s so the display stays fresh without user action.
 
 ## Setup Outline
@@ -76,7 +76,7 @@ What we lose vs the API:
 4. **X + VNC dev environment** ✅ done
    - `bash scripts/kiosk_bootstrap.sh` on the Pi. Installs `xserver-xorg xinit x11-xserver-utils openbox tigervnc-standalone-server unclutter wmctrl` (and `epiphany-browser`, which is now unused but harmless).
    - `bash scripts/kiosk_start.sh` starts a virtual X session on display `:1`, port `5901`. See "Kiosk dev mode (VNC)" below. Now launches the Python app directly.
-5. **Get the secret ICS URL(s)** ⏳
+5. **Get the secret ICS URL(s)** ✅
    - In Google Calendar (web): sidebar → hover a calendar → ⋮ → **Settings and sharing** → **Integrate calendar** → copy **Secret address in iCal format**. Use the *copy* button next to the field — clicking the link itself triggers a download in most browsers.
    - Guard the URL like a password (anyone with it can read that calendar).
    - Save it in `service/config.json`. Multi-calendar form (preferred — colors + prefixes let you tell events apart at a glance):
@@ -97,13 +97,14 @@ What we lose vs the API:
    - `prefix` (optional) is prepended to each event title (`G: dentist`) so multi-person calendars are readable even if the colors get muddy on the Pi's monitor.
    - `email` (optional but recommended when two people share a calendar) drives **organizer-based attribution**: when both people are invited to the same event, both feeds carry a copy. The parser reads the ICS `ORGANIZER` property, matches it against the configured `email` fields, and attributes the event to the *inviter's* calendar — so a dinner Griffin invited Zoe to shows in Griffin's color/prefix regardless of which feed delivered it. Duplicate copies from the other feed are then deduped away by `(summary, start, end)`.
    - The file is gitignored.
-6. **Python calendar app** ✅ scaffolded
-   - `service/calendar_client.py` — reads `config.json`, fetches the ICS URL, expands recurring events, returns events for a date range.
-   - `service/renderer.py` — tkinter month grid with event titles in each day cell.
-   - `service/main.py` — main loop. Holds view state (`anchor_date`). 60 s refetch via `root.after`. Wires GPIO buttons to state mutations + redraws.
+6. **Python calendar app** ✅ built
+   - `service/calendar_client.py` — reads `config.json`, fetches each configured ICS URL, expands recurring events, attributes shared events to the ORGANIZER's calendar, dedupes across feeds, sorts chronologically (all-day first, then timed by time-of-day). Supports per-calendar `require_attendee` filter for partner-style calendars.
+   - `service/renderer.py` — `MonthView` (6-row grid, event titles per day) and `WeekView` (7 day columns × hour rows, timed events as blocks positioned by start time and sized by duration; all-day / multi-day events pinned to a header strip).
+   - `service/main.py` — main loop. Holds view state (anchor + `month`/`week` mode). Rolling ±3 month event cache; nav within the window is a pure redraw (no network). 60 s background refetch via `root.after`. GPIO buttons (via `gpiozero`) and `←` / `→` / `Space` keyboard bindings both drive the same state mutations.
 7. **Swap kiosk_start.sh** ✅ done
    - xstartup now execs the Python app directly. Dropped browser detection + `wmctrl` fullscreen dance (tkinter goes fullscreen natively).
-8. **Physical display + autostart** ⏳ (blocked on HDMI cable/adapter — see Ongoing Issues)
+8. **Physical display + autostart** ⏳
+   - Wire the Pi to the chosen HDMI monitor via a mini-HDMI → HDMI cable.
    - Add `~/.xinitrc` + `systemd` unit that starts the X session on boot without VNC.
 9. **Wiring the buttons** ⏳
    - Breadboard first — verify each button prints its label using `service/button_test.py`.
@@ -164,11 +165,11 @@ in case the API route ever comes back on the menu; currently unused.
 - ❌ **Ruled out**: Epiphany as a browser kiosk — `--application-mode` is a dead end without the full web-app ceremony; runtime "page unresponsive" on the calendar embed under VNC (no GPU accel)
 - ✅ **Decision made**: build a native Python renderer, fetching the calendar as an ICS feed
 - ✅ Started but pivoted away from OAuth: Google Cloud project + Calendar API + Desktop OAuth client exist and are inert. Cheaper to just consume the secret ICS URL.
-- ✅ Python app scaffolded: `service/calendar_client.py`, `service/renderer.py`, `service/main.py`
+- ✅ Python app built: month view + week view (time-of-day grid), ±3 month event cache, multi-calendar with ORGANIZER-based attribution + cross-feed dedup + optional attendee filter, chronological sort, keyboard stand-ins for GPIO buttons
 - ✅ `scripts/kiosk_start.sh` swapped to launch the Python app directly
-- ⏳ Next: drop the secret ICS URL into `service/config.json`, re-run `pi_bootstrap.sh` on the Pi for the new deps, `scp` config across, and launch over VNC
-- ⏳ In parallel: wire the three buttons on the breadboard and run `python service/button_test.py`
-- ⏳ Blocked on **final** kiosk display (USB-C-only monitor mismatch — see Ongoing Issues); dev work is not blocked
+- ✅ `service/config.json` populated with the calendar URL(s); running over VNC
+- ⏳ Next: wire the three buttons on the breadboard and run `python service/button_test.py`, then swap keyboard stand-ins for real GPIO input
+- ⏳ Final kiosk display: mini-HDMI → HDMI cable to the chosen monitor; add `~/.xinitrc` + `systemd` unit for boot-time autostart
 
 ## Ongoing Issues
 
@@ -189,15 +190,11 @@ Debian 13 (Trixie) renamed / relocated several things vs Bookworm:
 - **tigervnc config path**: `~/.config/tigervnc/` (XDG), not `~/.vnc/`. Both password and log files live there. Old scripts referencing `~/.vnc/` still mostly work due to backward-compat but are misleading.
 - **Epiphany's private-mode flag**: `--incognito-mode`, not `--incognito` (Chrome's spelling). GNOME conventions.
 
-### 🟡 Portable monitor is USB-C-only (no HDMI input)
+### ✅ Solved: Portable monitor was USB-C-only (no HDMI input)
 
-- **Problem**: All the portable monitors on hand accept USB-C only, both for power and video. Pi Zero 2 WH outputs mini HDMI.
-- **Why it's tricky**: USB-C video is DisplayPort Alt Mode, not HDMI — a passive cable can't bridge the two.
-- **Options being considered**:
-  1. Active HDMI → USB-C DP converter (~$40–60, e.g. j5create JVA02) — needs its own USB power.
-  2. Buy a cheap dedicated HDMI display for the kiosk (~$50–80, 7–10" Pi-oriented panels).
-  3. Return one of the USB-C-only monitors for a dual-input model.
-- **Status**: open. Not blocking dev work (SSH is enough for now); only blocks the final kiosk display.
+- **Problem**: The portable monitors on hand accepted USB-C only, both for power and video. Pi Zero 2 WH outputs mini HDMI.
+- **Why it was tricky**: USB-C video is DisplayPort Alt Mode, not HDMI — a passive cable can't bridge the two. Active converters exist (~$40–60, e.g. j5create JVA02) but need their own USB power.
+- **Fix**: sidestepped by using a different monitor with an HDMI input; wired via a mini-HDMI → HDMI cable directly to the Pi.
 
 ### ✅ Solved: SSH failing on first-boot race
 
