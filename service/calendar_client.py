@@ -47,6 +47,9 @@ class Event:
     all_day: bool
     color: str = DEFAULT_EVENT_COLOR
     prefix: str = ""
+    # Preserves the original DTSTART datetime for timed events so we can sort
+    # by time-of-day within a day. None for all-day events (which have no time).
+    start_dt: datetime | None = None
 
 
 def _load_calendars() -> list[dict]:
@@ -72,6 +75,10 @@ def _load_calendars() -> list[dict]:
             "color": cal.get("color", DEFAULT_EVENT_COLOR),
             "prefix": cal.get("prefix", ""),
             "email": cal.get("email", "").lower(),
+            # If set, only keep events where this email is in the ATTENDEE list.
+            # Useful for a partner's calendar where you only want events they
+            # invited you to (skips their personal time-blocking).
+            "require_attendee": cal.get("require_attendee", "").lower(),
         })
     return normalized
 
@@ -100,6 +107,23 @@ def _organizer_email(comp) -> str:
     return addr
 
 
+def _attendee_emails(comp) -> set[str]:
+    """Return the set of ATTENDEE emails (lowercase). icalendar returns a
+    single vCalAddress when there's one attendee, a list when there are many —
+    we normalize both cases."""
+    raw = comp.get("ATTENDEE", [])
+    if not isinstance(raw, list):
+        raw = [raw]
+    result: set[str] = set()
+    for a in raw:
+        addr = str(a).strip().lower()
+        if addr.startswith("mailto:"):
+            addr = addr[len("mailto:"):]
+        if addr:
+            result.add(addr)
+    return result
+
+
 def _parse_events(
     ics_bytes: bytes,
     start: date,
@@ -112,8 +136,16 @@ def _parse_events(
     # concrete VEVENT instances that fall in [a, b].
     raw = recurring_ical_events.of(cal).between(start, end)
 
+    required_attendee = feed_cal.get("require_attendee", "")
     events: list[Event] = []
+    filtered = 0
     for comp in raw:
+        # Attendee filter — for partner-style calendars where we only want
+        # events they explicitly invited us to.
+        if required_attendee and required_attendee not in _attendee_emails(comp):
+            filtered += 1
+            continue
+
         dtstart = comp["DTSTART"].dt
         dtend_prop = comp.get("DTEND")
         dtend = dtend_prop.dt if dtend_prop else dtstart
@@ -135,7 +167,13 @@ def _parse_events(
                 all_day=all_day,
                 color=attribution["color"],
                 prefix=attribution["prefix"],
+                start_dt=dtstart if isinstance(dtstart, datetime) else None,
             )
+        )
+    if required_attendee and filtered:
+        print(
+            f"    (filtered {filtered} events not addressed to {required_attendee})",
+            file=sys.stderr,
         )
     return events
 
@@ -149,13 +187,17 @@ def get_events(start: date, end: date) -> list[Event]:
     calendars = _load_calendars()
     email_to_cal = {c["email"]: c for c in calendars if c["email"]}
 
+    print(f"fetching {len(calendars)} calendar(s) for {start}..{end}", file=sys.stderr)
     all_events: list[Event] = []
     for cal in calendars:
+        print(f"  → {cal['name']}...", end="", file=sys.stderr, flush=True)
         try:
             ics = _fetch_ics(cal["url"])
-            all_events.extend(_parse_events(ics, start, end, cal, email_to_cal))
+            parsed = _parse_events(ics, start, end, cal, email_to_cal)
+            all_events.extend(parsed)
+            print(f" {len(parsed)} events", file=sys.stderr)
         except Exception:
-            print(f"calendar {cal['name']!r} failed to fetch/parse:", file=sys.stderr)
+            print(" FAILED", file=sys.stderr)
             traceback.print_exc()
 
     # Dedupe on (summary, start, end, all_day). Google sometimes assigns
@@ -167,8 +209,19 @@ def get_events(start: date, end: date) -> list[Event]:
         seen.setdefault(key, e)
 
     deduped = list(seen.values())
-    # All-day events float to the top of a day, then sort by start.
-    deduped.sort(key=lambda e: (not e.all_day, e.start))
+    print(
+        f"  {len(all_events)} raw → {len(deduped)} after dedupe",
+        file=sys.stderr,
+    )
+    # Sort chronologically by day. Within a day, all-day events float to the
+    # top, then timed events by their time-of-day. Using (hour, minute) as a
+    # tuple sidesteps any tz-aware/naive datetime comparison issues.
+    def _sort_key(e: Event) -> tuple:
+        if e.start_dt is not None:
+            return (e.start, True, e.start_dt.hour, e.start_dt.minute)
+        return (e.start, False, 0, 0)
+
+    deduped.sort(key=_sort_key)
     return deduped
 
 
@@ -178,6 +231,6 @@ if __name__ == "__main__":
     month_start = today.replace(day=1)
     next_month = (month_start + timedelta(days=32)).replace(day=1)
     for e in get_events(month_start, next_month):
-        tag = "[all-day]" if e.all_day else "         "
+        tag = "[all-day]" if e.all_day else (e.start_dt.strftime("[%H:%M]  ") if e.start_dt else "         ")
         who = f"[{e.prefix}]" if e.prefix else "   "
         print(f"{e.start} {tag} {who} {e.summary}")
