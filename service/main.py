@@ -40,6 +40,12 @@ class App:
         self.root.attributes("-fullscreen", True)
         # Escape exits — convenient during dev over VNC.
         self.root.bind("<Escape>", lambda _e: self.root.destroy())
+        # Keyboard stand-ins for the physical buttons so month navigation is
+        # testable over VNC before the GPIO wiring exists. Mapping matches the
+        # button roles in the README hardware table.
+        self.root.bind("<Left>",  lambda _e: self.prev_month())
+        self.root.bind("<Right>", lambda _e: self.next_month())
+        self.root.bind("<space>", lambda _e: self.toggle_view())
 
         self.anchor = date.today().replace(day=1)
         self.events: list[Event] = []
