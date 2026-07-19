@@ -141,13 +141,16 @@ class App:
 
     def toggle_view(self) -> None:
         """Flip month ↔ week and preserve the anchor semantically. Month → week
-        picks the Monday of the anchor's week (which may be in the previous
-        month when anchor sits early in the month); week → month re-anchors to
-        the first of the anchor Monday's month."""
+        snaps to today's week when the anchor is on the current month, else to
+        the Monday of the anchor's month's first week — so browsing a future
+        month and toggling stays in that month instead of jumping to today.
+        Week → month re-anchors to the first of the anchor Monday's month."""
         old_view = self.view
         if self.view_mode == "month":
             self.view_mode = "week"
-            self.anchor = self.anchor - timedelta(days=self.anchor.weekday())
+            today = date.today()
+            ref = today if (self.anchor.year, self.anchor.month) == (today.year, today.month) else self.anchor
+            self.anchor = ref - timedelta(days=ref.weekday())
         else:
             self.view_mode = "month"
             self.anchor = self.anchor.replace(day=1)
