@@ -95,11 +95,15 @@ class MonthView:
                 ).pack(anchor="nw", padx=3, pady=(2, 0))
 
                 for ev in events_by_day.get(d, []):
+                    label = f"{ev.prefix}: {ev.summary}" if ev.prefix else ev.summary
                     tk.Label(
                         cell,
-                        text=ev.summary,
+                        text=label,
                         bg=bg,
-                        fg=TEXT_EVENT if in_month else TEXT_DIM,
+                        # In-month days use the calendar's own color so mixed
+                        # calendars are visually distinguishable. Non-month
+                        # days stay dim regardless.
+                        fg=ev.color if in_month else TEXT_DIM,
                         font=("Helvetica", 9),
                         anchor="w",
                         justify="left",

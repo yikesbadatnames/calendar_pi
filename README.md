@@ -76,13 +76,26 @@ What we lose vs the API:
 4. **X + VNC dev environment** ✅ done
    - `bash scripts/kiosk_bootstrap.sh` on the Pi. Installs `xserver-xorg xinit x11-xserver-utils openbox tigervnc-standalone-server unclutter wmctrl` (and `epiphany-browser`, which is now unused but harmless).
    - `bash scripts/kiosk_start.sh` starts a virtual X session on display `:1`, port `5901`. See "Kiosk dev mode (VNC)" below. Now launches the Python app directly.
-5. **Get the secret ICS URL** ⏳
-   - In Google Calendar (web): sidebar → hover primary calendar → ⋮ → **Settings and sharing** → **Integrate calendar** → copy **Secret address in iCal format**.
-   - Guard it like a password (anyone with the URL can read the calendar).
-   - Save it in `service/config.json`:
+5. **Get the secret ICS URL(s)** ⏳
+   - In Google Calendar (web): sidebar → hover a calendar → ⋮ → **Settings and sharing** → **Integrate calendar** → copy **Secret address in iCal format**. Use the *copy* button next to the field — clicking the link itself triggers a download in most browsers.
+   - Guard the URL like a password (anyone with it can read that calendar).
+   - Save it in `service/config.json`. Multi-calendar form (preferred — colors + prefixes let you tell events apart at a glance):
      ```json
-     { "ics_url": "https://calendar.google.com/calendar/ical/.../basic.ics" }
+     {
+       "calendars": [
+         { "name": "Griffin", "prefix": "G", "email": "griffin@x.com",
+           "url": "https://calendar.google.com/calendar/ical/.../basic.ics",
+           "color": "#c8d4ff" },
+         { "name": "Zoe",     "prefix": "Z", "email": "zoe@x.com",
+           "url": "https://calendar.google.com/calendar/ical/.../basic.ics",
+           "color": "#ffcccb" }
+       ]
+     }
      ```
+     Single-calendar shorthand also works: `{ "ics_url": "https://..." }`.
+   - `color` is optional; unspecified events render in the default light-blue.
+   - `prefix` (optional) is prepended to each event title (`G: dentist`) so multi-person calendars are readable even if the colors get muddy on the Pi's monitor.
+   - `email` (optional but recommended when two people share a calendar) drives **organizer-based attribution**: when both people are invited to the same event, both feeds carry a copy. The parser reads the ICS `ORGANIZER` property, matches it against the configured `email` fields, and attributes the event to the *inviter's* calendar — so a dinner Griffin invited Zoe to shows in Griffin's color/prefix regardless of which feed delivered it. Duplicate copies from the other feed are then deduped away by `(summary, start, end)`.
    - The file is gitignored.
 6. **Python calendar app** ✅ scaffolded
    - `service/calendar_client.py` — reads `config.json`, fetches the ICS URL, expands recurring events, returns events for a date range.
