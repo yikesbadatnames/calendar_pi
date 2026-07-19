@@ -47,9 +47,11 @@ class Event:
     all_day: bool
     color: str = DEFAULT_EVENT_COLOR
     prefix: str = ""
-    # Preserves the original DTSTART datetime for timed events so we can sort
-    # by time-of-day within a day. None for all-day events (which have no time).
+    # Preserves the original DTSTART/DTEND datetimes for timed events so we can
+    # sort by time-of-day and size week-view event blocks by duration. None for
+    # all-day events (which have no time).
     start_dt: datetime | None = None
+    end_dt: datetime | None = None
 
 
 def _load_calendars() -> list[dict]:
@@ -168,6 +170,7 @@ def _parse_events(
                 color=attribution["color"],
                 prefix=attribution["prefix"],
                 start_dt=dtstart if isinstance(dtstart, datetime) else None,
+                end_dt=dtend if isinstance(dtend, datetime) else None,
             )
         )
     if required_attendee and filtered:
