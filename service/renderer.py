@@ -110,16 +110,20 @@ class MonthView:
                 ).pack(anchor="nw", padx=3, pady=(2, 0))
 
                 for ev in events_by_day.get(d, []):
-                    label = f"{ev.prefix}: {ev.summary}" if ev.prefix else ev.summary
-                    # Prefix timed events with start time on their start day
-                    # only (Google Calendar-style). Compact "9am" / "9:30am" so
-                    # the title still fits in a narrow cell.
+                    # Format: "[prefix: ][time - ]summary". Time only appears on
+                    # the event's start day for timed events (Google Calendar-
+                    # style); compact "9am" / "9:30am" keeps narrow cells readable.
+                    time_str = ""
                     if ev.start_dt is not None and d == ev.start:
                         t = ev.start_dt
                         hour12 = t.hour % 12 or 12
                         suffix = "am" if t.hour < 12 else "pm"
                         time_str = f"{hour12}{suffix}" if t.minute == 0 else f"{hour12}:{t.minute:02d}{suffix}"
-                        label = f"{time_str} {label}"
+                    label = ev.summary
+                    if time_str:
+                        label = f"{time_str} - {label}"
+                    if ev.prefix:
+                        label = f"{ev.prefix}: {label}"
                     tk.Label(
                         cell,
                         text=label,
