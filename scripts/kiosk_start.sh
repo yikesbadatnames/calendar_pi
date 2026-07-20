@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# SUPERSEDED — kept for reference, don't run this alongside the HDMI kiosk.
+#
+# This was how we ran the kiosk before a physical monitor existed. TigerVNC's
+# vncserver creates a *separate* virtual display (:1), so this doesn't show you
+# the real kiosk on :0 — it starts a second, independent copy of the app. Two
+# copies can't share the GPIO buttons: the second one to start fails its pin
+# claims with 'GPIO busy'. main.py now refuses to start twice, so a stray run
+# of this script will bring up an empty X session instead of a calendar.
+#
+# To view the real kiosk remotely, mirror :0 instead of making a new display:
+#   sudo apt install x11vnc
+#   x11vnc -display :0 -localhost no -forever
+#
 # Start (or restart) the VNC-hosted kiosk on display :1.
 # Launches the calendar_pi Python app fullscreen inside a minimal X session.
 # Usage:

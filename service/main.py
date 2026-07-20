@@ -8,6 +8,7 @@ onto the main thread via root.after(0, ...).
 
 from __future__ import annotations
 
+import socket
 import sys
 import traceback
 from datetime import date, timedelta
@@ -30,6 +31,36 @@ WINDOW_MONTHS_FORWARD = 3
 PIN_TOGGLE = 17
 PIN_PREV = 27
 PIN_NEXT = 22
+
+# Leading NUL puts this in Linux's abstract socket namespace: no file on disk,
+# and the kernel drops the name when the process dies. That's the whole appeal
+# over a pidfile — a killed or crashed kiosk leaves nothing stale to clean up.
+_INSTANCE_LOCK_ADDR = "\0calendar_pi-kiosk"
+
+# Module-level so the socket outlives acquire_instance_lock(); if it were
+# garbage collected the name would be released and the guard would do nothing.
+_instance_lock: socket.socket | None = None
+
+
+def acquire_instance_lock() -> bool:
+    """True if we're the only kiosk running, False if another holds the lock.
+
+    Two instances can't share the GPIO buttons — the second one's pin claims
+    fail with 'GPIO busy' — so we'd rather refuse to start than half-run.
+    Abstract sockets are Linux-only; on the Mac we skip the check entirely
+    since dev instances there have no pins to fight over.
+    """
+    global _instance_lock
+    if not sys.platform.startswith("linux"):
+        return True
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.bind(_INSTANCE_LOCK_ADDR)
+    except OSError:
+        sock.close()
+        return False
+    _instance_lock = sock
+    return True
 
 
 def _advance_months(anchor: date, months: int) -> date:
@@ -174,18 +205,31 @@ def wire_buttons(app: App) -> list:
         # Marshal onto tkinter's main thread.
         return lambda: app.root.after(0, fn)
 
-    buttons = [
-        Button(PIN_TOGGLE, pull_up=True, bounce_time=0.05),
-        Button(PIN_PREV, pull_up=True, bounce_time=0.05),
-        Button(PIN_NEXT, pull_up=True, bounce_time=0.05),
-    ]
-    buttons[0].when_pressed = on_main(app.toggle_view)
-    buttons[1].when_pressed = on_main(app.prev_period)
-    buttons[2].when_pressed = on_main(app.next_period)
+    # Claim pins one at a time so a single unavailable line costs us that one
+    # button rather than the whole calendar. 'GPIO busy' means something else
+    # already owns the line — usually a second kiosk instance.
+    buttons = []
+    for pin, name, action in (
+        (PIN_TOGGLE, "toggle", app.toggle_view),
+        (PIN_PREV, "prev", app.prev_period),
+        (PIN_NEXT, "next", app.next_period),
+    ):
+        try:
+            button = Button(pin, pull_up=True, bounce_time=0.05)
+        except Exception as e:
+            print(f"button {name} (BCM{pin}) unavailable: {e}", file=sys.stderr)
+            continue
+        button.when_pressed = on_main(action)
+        buttons.append(button)
     return buttons
 
 
 def main() -> None:
+    if not acquire_instance_lock():
+        # Exit 0, not 1: a duplicate launch is a no-op we handled, not a
+        # failure. Keeps `Restart=on-failure` supervisors from spinning.
+        print("calendar_pi is already running; exiting.", file=sys.stderr)
+        return
     root = tk.Tk()
     root.title("calendar_pi")
     app = App(root)
