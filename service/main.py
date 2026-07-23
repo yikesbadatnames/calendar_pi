@@ -97,14 +97,13 @@ class App:
         # input — not stand-ins. "Period" means the currently visible span: a
         # month in month mode, a week in week mode.
         #   Left / Right : previous / next period
-        #   Up / Down    : month / week view (explicit, not a blind toggle —
-        #                  Up always shows month, Down always shows week, so
-        #                  repeats are idempotent)
-        # Space is kept as a toggle for dev over VNC.
+        #   Up / Down    : toggle month <-> week — either key flips, so no key
+        #                  is ever a dead no-op regardless of the current view
+        # Space toggles too, a convenient stand-in during dev over VNC.
         self.root.bind("<Left>",  lambda _e: self._on_key(self.prev_period))
         self.root.bind("<Right>", lambda _e: self._on_key(self.next_period))
-        self.root.bind("<Up>",    lambda _e: self._on_key(self.show_month))
-        self.root.bind("<Down>",  lambda _e: self._on_key(self.show_week))
+        self.root.bind("<Up>",    lambda _e: self._on_key(self.toggle_view))
+        self.root.bind("<Down>",  lambda _e: self._on_key(self.toggle_view))
         self.root.bind("<space>", lambda _e: self._on_key(self.toggle_view))
 
         # Timestamp of the last accepted key action, for input throttling.
@@ -238,23 +237,12 @@ class App:
         self.view.frame.pack(fill="both", expand=True)
         self.view.draw(self.anchor, self.events)
 
-    def show_month(self) -> None:
-        """Switch to month view; no-op if already there. Delegates to
-        toggle_view so the anchor-snapping logic lives in one place."""
-        if self.view_mode != "month":
-            self.toggle_view()
-
-    def show_week(self) -> None:
-        """Switch to week view; no-op if already there."""
-        if self.view_mode != "week":
-            self.toggle_view()
-
     def _on_key(self, action) -> None:
         """Throttle keyboard input. Drops any press arriving within
         MIN_ACTION_INTERVAL_S of the last accepted one, so key autorepeat (from
         holding a key) or fast mashing can't spam redraws / network refetches.
-        Gating here at the binding layer — not inside the action methods — keeps
-        internal calls like show_month() -> toggle_view() from self-throttling."""
+        Gating here at the binding layer keeps the throttle in one place and off
+        the semantic methods, so callers other than key events aren't affected."""
         now = time.monotonic()
         if now - self._last_action_t < MIN_ACTION_INTERVAL_S:
             return
