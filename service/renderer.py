@@ -30,10 +30,12 @@ TEXT_EVENT = "#c8d4ff"
 HEADER_BG = "#1a1a1a"
 GRID_LINE = "#222222"
 
-# WeekView-specific. Fixed hour range (below/above are dropped from the timed
-# grid); multi-day timed events fall back to the all-day strip.
-HOUR_START = 6                    # first hour shown (6am)
-HOUR_END = 23                     # grid ends at HOUR_END:00 (i.e. shows 6–23)
+# WeekView-specific. Fixed vertical window, expressed in minutes past midnight
+# so the top edge can land on a half-hour (7:30) rather than only whole hours.
+# Events above/below are clamped to the edges; multi-day timed events fall back
+# to the all-day strip.
+VIEW_START_MIN = 7 * 60 + 30      # top of grid: 7:30am
+VIEW_END_MIN = 23 * 60            # bottom of grid: 11:00pm
 PX_PER_HOUR = 40
 TIME_LABEL_WIDTH = 60
 ALLDAY_STRIP_ROW_HEIGHT = 18
@@ -340,8 +342,8 @@ class WeekView:
         day_col_width: float,
         today: date,
     ) -> None:
-        hours_shown = HOUR_END - HOUR_START
-        total_height = hours_shown * PX_PER_HOUR
+        px_per_min = PX_PER_HOUR / 60
+        total_height = (VIEW_END_MIN - VIEW_START_MIN) * px_per_min
 
         # Column backgrounds (today's column highlighted).
         for i in range(7):
@@ -352,21 +354,30 @@ class WeekView:
                 x, 0, x + day_col_width, total_height, fill=bg, outline="",
             )
 
-        # Horizontal hour lines + left-column time labels.
-        for h in range(hours_shown + 1):
-            y = h * PX_PER_HOUR
+        # Horizontal grid lines at each whole hour inside the window, labeled in
+        # the left column. When the window starts mid-hour (7:30) the top edge
+        # gets its own boundary line + label so it's clear where the day begins.
+        def hour_line(y: float, label: str | None) -> None:
             self.grid_canvas.create_line(
                 TIME_LABEL_WIDTH, y,
                 TIME_LABEL_WIDTH + 7 * day_col_width, y,
                 fill=GRID_LINE,
             )
-            if h < hours_shown:
+            if label is not None:
                 self.grid_canvas.create_text(
                     TIME_LABEL_WIDTH - 6, y + 2,
-                    text=f"{HOUR_START + h:02d}:00",
-                    fill=TEXT_DIM, anchor="ne",
+                    text=label, fill=TEXT_DIM, anchor="ne",
                     font=("Helvetica", 8),
                 )
+
+        if VIEW_START_MIN % 60 != 0:
+            hour_line(0, f"{VIEW_START_MIN // 60:02d}:{VIEW_START_MIN % 60:02d}")
+        first_hour = -(-VIEW_START_MIN // 60)   # ceil up to the next whole hour
+        last_hour = VIEW_END_MIN // 60
+        for h in range(first_hour, last_hour + 1):
+            y = (h * 60 - VIEW_START_MIN) * px_per_min
+            # Skip the bottom-most label so it doesn't clip past the grid edge.
+            hour_line(y, f"{h:02d}:00" if h < last_hour else None)
 
         # Vertical day-column dividers.
         for i in range(8):
@@ -447,11 +458,12 @@ class WeekView:
     ) -> None:
         assert e.start_dt is not None and e.end_dt is not None
 
-        # Y: convert to minutes-from-HOUR_START, clamp into the visible range.
-        start_min = (e.start_dt.hour - HOUR_START) * 60 + e.start_dt.minute
+        # Y: minutes from the window's top edge, clamped into the visible range.
+        px_per_min = PX_PER_HOUR / 60
+        start_min = e.start_dt.hour * 60 + e.start_dt.minute - VIEW_START_MIN
         duration_min = (e.end_dt - e.start_dt).total_seconds() / 60
-        y_top = start_min * PX_PER_HOUR / 60
-        y_bottom = y_top + max(MIN_EVENT_HEIGHT, duration_min * PX_PER_HOUR / 60)
+        y_top = start_min * px_per_min
+        y_bottom = y_top + max(MIN_EVENT_HEIGHT, duration_min * px_per_min)
         y_top = max(0.0, min(y_top, total_height - MIN_EVENT_HEIGHT))
         y_bottom = max(y_top + MIN_EVENT_HEIGHT, min(y_bottom, total_height))
 

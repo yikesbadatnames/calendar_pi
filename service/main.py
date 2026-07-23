@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import socket
 import sys
+import time
 import traceback
 from datetime import date, timedelta
 
@@ -20,12 +21,20 @@ from renderer import MonthView, WeekView
 
 REFRESH_MS = 60_000
 
+# Minimum time between accepted key actions. Key autorepeat (holding a key down)
+# and mashing both fire far faster than this; anything sooner than the interval
+# is dropped, so a held/spammed key can't chain into a burst of redraws and,
+# worse, back-to-back network refetches. 0.15s still allows brisk intentional
+# taps while cutting autorepeat (~30/s) down to a handful per second.
+MIN_ACTION_INTERVAL_S = 0.15
+
 # Rolling fetch window around the anchor month. Navigation within this window
-# is instant (no network). Bigger = smoother, at the cost of a slightly longer
-# first fetch and marginally more memory. 3+3 lets you swipe half a year in
-# either direction before hitting a refetch.
-WINDOW_MONTHS_BACK = 3
-WINDOW_MONTHS_FORWARD = 3
+# is instant (no network); only stepping outside it triggers a refetch. Skewed
+# forward because you look ahead far more than behind: 2 back + 6 forward means
+# half a year of look-ahead before a refetch, at the cost of a slightly longer
+# first fetch and marginally more memory.
+WINDOW_MONTHS_BACK = 2
+WINDOW_MONTHS_FORWARD = 6
 
 # BCM pin numbers — match the README hardware table and button_test.py.
 PIN_TOGGLE = 17
@@ -92,11 +101,14 @@ class App:
         #                  Up always shows month, Down always shows week, so
         #                  repeats are idempotent)
         # Space is kept as a toggle for dev over VNC.
-        self.root.bind("<Left>",  lambda _e: self.prev_period())
-        self.root.bind("<Right>", lambda _e: self.next_period())
-        self.root.bind("<Up>",    lambda _e: self.show_month())
-        self.root.bind("<Down>",  lambda _e: self.show_week())
-        self.root.bind("<space>", lambda _e: self.toggle_view())
+        self.root.bind("<Left>",  lambda _e: self._on_key(self.prev_period))
+        self.root.bind("<Right>", lambda _e: self._on_key(self.next_period))
+        self.root.bind("<Up>",    lambda _e: self._on_key(self.show_month))
+        self.root.bind("<Down>",  lambda _e: self._on_key(self.show_week))
+        self.root.bind("<space>", lambda _e: self._on_key(self.toggle_view))
+
+        # Timestamp of the last accepted key action, for input throttling.
+        self._last_action_t = 0.0
 
         self.anchor = date.today().replace(day=1)
         self.events: list[Event] = []
@@ -111,6 +123,14 @@ class App:
         self.view_mode: str = "month"
         self.month_view = MonthView(root, visible=True)
         self.week_view = WeekView(root, visible=False)
+
+        # Overlay shown while a network refetch is in flight so a blocking fetch
+        # reads as "working" not "frozen". Uses place() (not pack/grid) so it
+        # floats over whichever view is active without touching their layout.
+        self.status = tk.Label(
+            root, text="", bg="#1e2a3a", fg="#ffffff",
+            font=("Helvetica", 11, "bold"), padx=10, pady=4,
+        )
 
         # First fetch is synchronous so the initial render has data;
         # subsequent refreshes are timer-driven.
@@ -133,17 +153,40 @@ class App:
             return _advance_months(self.anchor, 1)
         return self.anchor + timedelta(days=7)
 
+    def _show_status(self, text: str) -> None:
+        self.status.config(text=text)
+        self.status.place(relx=1.0, rely=0.0, x=-12, y=12, anchor="ne")
+        self.status.lift()
+
+    def _hide_status(self) -> None:
+        self.status.place_forget()
+
     def _refetch_window_and_redraw(self) -> None:
         window_start, window_end = self._window_for(self.anchor)
+        # Paint the badge BEFORE the blocking fetch. get_events runs on this (UI)
+        # thread, so nothing repaints until it returns; update_idletasks flushes
+        # just the redraw without processing key events (so a mid-fetch button
+        # press can't re-enter this method).
+        self._show_status("Updating…")
+        self.root.update_idletasks()
+        ok = True
         try:
             self.events = get_events(window_start, window_end)
             self.window_start = window_start
             self.window_end = window_end
         except Exception:
             # Keep whatever we had on screen; log and move on.
+            ok = False
             print("calendar fetch failed:", file=sys.stderr)
             traceback.print_exc()
         self.view.draw(self.anchor, self.events)
+        if ok:
+            self._hide_status()
+        else:
+            # Distinct message so a failed refresh doesn't masquerade as a good
+            # one; auto-clears, and the 60s timer will retry on its own.
+            self._show_status("⚠ refresh failed — will retry")
+            self.root.after(4000, self._hide_status)
 
     def _periodic_refresh(self) -> None:
         self._refetch_window_and_redraw()
@@ -205,6 +248,18 @@ class App:
         """Switch to week view; no-op if already there."""
         if self.view_mode != "week":
             self.toggle_view()
+
+    def _on_key(self, action) -> None:
+        """Throttle keyboard input. Drops any press arriving within
+        MIN_ACTION_INTERVAL_S of the last accepted one, so key autorepeat (from
+        holding a key) or fast mashing can't spam redraws / network refetches.
+        Gating here at the binding layer — not inside the action methods — keeps
+        internal calls like show_month() -> toggle_view() from self-throttling."""
+        now = time.monotonic()
+        if now - self._last_action_t < MIN_ACTION_INTERVAL_S:
+            return
+        self._last_action_t = now
+        action()
 
 
 def wire_buttons(app: App) -> list:
