@@ -84,12 +84,18 @@ class App:
         self.root.attributes("-fullscreen", True)
         # Escape exits — convenient during dev over VNC.
         self.root.bind("<Escape>", lambda _e: self.root.destroy())
-        # Keyboard stand-ins for the physical buttons so navigation is
-        # testable over VNC before the GPIO wiring exists. Mapping matches the
-        # button roles in the README hardware table. "Period" here means the
-        # currently visible span — a month in month mode, a week in week mode.
+        # A USB arrow pad is a HID keyboard, so these bindings ARE the kiosk's
+        # input — not stand-ins. "Period" means the currently visible span: a
+        # month in month mode, a week in week mode.
+        #   Left / Right : previous / next period
+        #   Up / Down    : month / week view (explicit, not a blind toggle —
+        #                  Up always shows month, Down always shows week, so
+        #                  repeats are idempotent)
+        # Space is kept as a toggle for dev over VNC.
         self.root.bind("<Left>",  lambda _e: self.prev_period())
         self.root.bind("<Right>", lambda _e: self.next_period())
+        self.root.bind("<Up>",    lambda _e: self.show_month())
+        self.root.bind("<Down>",  lambda _e: self.show_week())
         self.root.bind("<space>", lambda _e: self.toggle_view())
 
         self.anchor = date.today().replace(day=1)
@@ -188,6 +194,17 @@ class App:
         old_view.frame.pack_forget()
         self.view.frame.pack(fill="both", expand=True)
         self.view.draw(self.anchor, self.events)
+
+    def show_month(self) -> None:
+        """Switch to month view; no-op if already there. Delegates to
+        toggle_view so the anchor-snapping logic lives in one place."""
+        if self.view_mode != "month":
+            self.toggle_view()
+
+    def show_week(self) -> None:
+        """Switch to week view; no-op if already there."""
+        if self.view_mode != "week":
+            self.toggle_view()
 
 
 def wire_buttons(app: App) -> list:
