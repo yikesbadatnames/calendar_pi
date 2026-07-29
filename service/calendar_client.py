@@ -10,7 +10,8 @@ Config lives in service/config.json (gitignored). Two accepted shapes:
                              "color": "#ffcccb"}
     ]}
 
-Public API: get_events(start, end) → list[Event] merged across all calendars.
+Public API: get_events(start, end) → list[Event] merged across all calendars,
+raising CalendarFetchError (with partial results attached) if a feed failed.
 Events are attributed to the calendar whose configured email matches the
 ORGANIZER property, so a shared event (both people invited) always shows in
 the inviter's color/prefix regardless of which feed it arrived on. Duplicates
@@ -37,6 +38,21 @@ CONFIG_PATH = SERVICE_DIR / "config.json"
 # Kept in sync with renderer.TEXT_EVENT so single-calendar configs look
 # identical to how they did before multi-calendar support landed.
 DEFAULT_EVENT_COLOR = "#c8d4ff"
+
+
+class CalendarFetchError(Exception):
+    """Raised when one or more configured feeds failed to fetch or parse.
+
+    `partial` carries the events from the feeds that *did* succeed (possibly
+    empty). Callers already showing good data should keep it rather than
+    replace it with an incomplete set; callers with a blank screen can fall
+    back to `partial`. Without this, a single dropped request looks identical
+    to "you genuinely have no events".
+    """
+
+    def __init__(self, message: str, partial: list["Event"]):
+        super().__init__(message)
+        self.partial = partial
 
 
 @dataclass
@@ -181,28 +197,7 @@ def _parse_events(
     return events
 
 
-def get_events(start: date, end: date) -> list[Event]:
-    """Return events overlapping [start, end) merged across all configured
-    calendars. Per-calendar fetch failures are logged and skipped so one bad
-    URL doesn't blank the whole display. Duplicates across feeds (shared
-    events both people were invited to) are deduped after organizer-based
-    attribution — both copies resolve to the same inviter, so any copy wins."""
-    calendars = _load_calendars()
-    email_to_cal = {c["email"]: c for c in calendars if c["email"]}
-
-    print(f"fetching {len(calendars)} calendar(s) for {start}..{end}", file=sys.stderr)
-    all_events: list[Event] = []
-    for cal in calendars:
-        print(f"  → {cal['name']}...", end="", file=sys.stderr, flush=True)
-        try:
-            ics = _fetch_ics(cal["url"])
-            parsed = _parse_events(ics, start, end, cal, email_to_cal)
-            all_events.extend(parsed)
-            print(f" {len(parsed)} events", file=sys.stderr)
-        except Exception:
-            print(" FAILED", file=sys.stderr)
-            traceback.print_exc()
-
+def _dedupe_and_sort(all_events: list[Event]) -> list[Event]:
     # Dedupe on (summary, start, end, all_day). Google sometimes assigns
     # separate UIDs per invitee for the same underlying event, so we key on
     # the visible content instead.
@@ -228,12 +223,56 @@ def get_events(start: date, end: date) -> list[Event]:
     return deduped
 
 
+def get_events(start: date, end: date) -> list[Event]:
+    """Return events overlapping [start, end) merged across all configured
+    calendars. Duplicates across feeds (shared events both people were invited
+    to) are deduped after organizer-based attribution — both copies resolve to
+    the same inviter, so any copy wins.
+
+    Raises CalendarFetchError if any feed failed, with whatever we did get
+    attached as `.partial`. We deliberately don't return a short list as if it
+    were the truth: the caller can't tell "no events" from "wifi hiccup", and
+    silently swapping in the shorter list is how the display goes blank.
+    """
+    calendars = _load_calendars()
+    email_to_cal = {c["email"]: c for c in calendars if c["email"]}
+
+    print(f"fetching {len(calendars)} calendar(s) for {start}..{end}", file=sys.stderr)
+    all_events: list[Event] = []
+    failures: list[str] = []
+    for cal in calendars:
+        print(f"  → {cal['name']}...", end="", file=sys.stderr, flush=True)
+        try:
+            ics = _fetch_ics(cal["url"])
+            parsed = _parse_events(ics, start, end, cal, email_to_cal)
+            all_events.extend(parsed)
+            print(f" {len(parsed)} events", file=sys.stderr)
+        except Exception:
+            print(" FAILED", file=sys.stderr)
+            failures.append(cal["name"])
+            traceback.print_exc()
+
+    result = _dedupe_and_sort(all_events)
+    if failures:
+        raise CalendarFetchError(
+            f"{len(failures)} of {len(calendars)} calendar(s) failed: "
+            f"{', '.join(failures)}",
+            result,
+        )
+    return result
+
+
 if __name__ == "__main__":
     # Quick smoke test: python calendar_client.py
     today = date.today()
     month_start = today.replace(day=1)
     next_month = (month_start + timedelta(days=32)).replace(day=1)
-    for e in get_events(month_start, next_month):
+    try:
+        events = get_events(month_start, next_month)
+    except CalendarFetchError as err:
+        print(f"\n!! {err} — showing partial results\n", file=sys.stderr)
+        events = err.partial
+    for e in events:
         tag = "[all-day]" if e.all_day else (e.start_dt.strftime("[%H:%M]  ") if e.start_dt else "         ")
         who = f"[{e.prefix}]" if e.prefix else "   "
         print(f"{e.start} {tag} {who} {e.summary}")

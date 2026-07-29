@@ -119,7 +119,7 @@ What we lose vs the API:
    - Draws either the month grid (`MonthView`) or a Google-Calendar-style week view (`WeekView` — 7 day columns × hour rows, timed events as blocks sized by duration, all-day / multi-day events pinned to a header strip). Toggle button flips between them.
    - Watches GPIO 17/27/22 via `gpiozero`; `←` / `→` / `Space` keyboard bindings mirror those for VNC dev.
 4. Button presses mutate view state (advance the anchor by one period — a month or a week depending on mode — or toggle the mode) → trigger a redraw. A ±3 month event cache means nav within the window is a pure redraw (no network).
-5. Background timer re-fetches every 60 s so the display stays fresh without user action.
+5. Background timer re-fetches every 5 min (60 s after a failed fetch) so the display stays fresh without user action. A second, network-free 10 s timer watches the system clock and re-anchors the view if the date moves under it — see "Stuck on a boot-time date".
 
 ## Setup Outline
 
@@ -158,7 +158,7 @@ What we lose vs the API:
 6. **Python calendar app** ✅ built
    - `service/calendar_client.py` — reads `config.json`, fetches each configured ICS URL, expands recurring events, attributes shared events to the ORGANIZER's calendar, dedupes across feeds, sorts chronologically (all-day first, then timed by time-of-day). Supports per-calendar `require_attendee` filter for partner-style calendars.
    - `service/renderer.py` — `MonthView` (6-row grid, event titles per day) and `WeekView` (7 day columns × hour rows, timed events as blocks positioned by start time and sized by duration; all-day / multi-day events pinned to a header strip).
-   - `service/main.py` — main loop. Holds view state (anchor + `month`/`week` mode). Rolling ±3 month event cache; nav within the window is a pure redraw (no network). 60 s background refetch via `root.after`. GPIO buttons (via `gpiozero`) and `←` / `→` / `Space` keyboard bindings both drive the same state mutations.
+   - `service/main.py` — main loop. Holds view state (anchor + `month`/`week` mode). Rolling ±3 month event cache; nav within the window is a pure redraw (no network). 5 min background refetch via `root.after`, backing off to a 60 s retry while fetches are failing. GPIO buttons (via `gpiozero`) and `←` / `→` / `Space` keyboard bindings both drive the same state mutations.
 7. **Swap kiosk_start.sh** ✅ done
    - xstartup now execs the Python app directly. Dropped browser detection + `wmctrl` fullscreen dance (tkinter goes fullscreen natively).
 8. **Physical display + autostart** ✅ done
@@ -295,9 +295,23 @@ Then add a logger recording IP, route, and reachability every 30 s to a file on 
 ### 📋 Blank calendar for the first minute after boot
 
 - **Symptom**: after a cold boot the grid renders but is empty; populates ~60 s later with no intervention.
-- **Cause**: the kiosk launches before Wi-Fi finishes associating, so the first synchronous ICS fetch fails. `_refetch_window_and_redraw` catches it, logs to stderr, and draws whatever it has (nothing). The 60 s refresh timer then succeeds.
+- **Cause**: the kiosk launches before Wi-Fi finishes associating, so the first synchronous ICS fetch fails. `_refetch_window_and_redraw` catches it, logs to stderr, and draws whatever it has (nothing). The refresh timer then succeeds.
 - **Not a bug** — this is the error handling working. Cosmetic only.
-- **If it ever annoys**: retry in ~5 s after a failed fetch instead of the full 60, or move autostart to a systemd unit ordered `After=network-online.target`.
+- **Now**: a failed fetch schedules the next attempt at `RETRY_MS` (60 s) instead of the full `REFRESH_MS` (5 min), so the blank window doesn't get longer as the normal cadence slows down. Moving autostart to a systemd unit ordered `After=network-online.target` would remove it entirely.
+
+### ✅ Solved: display blanked at random on a good network
+
+- **Symptom**: a fully populated calendar would occasionally drop to an empty grid, then repopulate a minute later. Looked like the render "losing" its data.
+- **Cause**: `get_events()` caught each feed's exception internally and returned whatever it had collected — possibly `[]`. So `main.py`'s `except` never fired, and `self.events` was overwritten with an empty list while the UI reported success. One dropped request per minute over Pi wifi made this frequent.
+- **Fix**: `get_events()` now raises `CalendarFetchError` if *any* feed failed, carrying the successful feeds' events as `.partial`. `_refetch_window_and_redraw` keeps the data already on screen and shows the ⚠ badge; only a cold start (nothing cached yet) falls back to the partial set.
+- **Lesson**: "handled the error" and "the caller can tell something went wrong" are different things. Swallowing a failure and returning a plausible-looking empty result is worse than raising — the caller silently believes it.
+
+### ✅ Solved: stuck on a boot-time date
+
+- **Symptom**: kiosk displaying a month years in the past (2018) and never correcting itself.
+- **Cause**: the Pi Zero has no battery-backed RTC. At boot the clock is whatever `fake-hwclock` last saved, and it only jumps to real time once wifi is up and NTP syncs — typically *after* the app has started. `App.__init__` read `date.today()` exactly once, so the anchor froze on the bogus date permanently. (The same bug meant the view never followed midnight rollover either.)
+- **Fix**: `_clock_tick` re-reads the clock every 10 s. If the date moved and the user hasn't navigated away, it re-anchors to the new date and lets `_navigate_to` refetch when the corrected window falls outside the cached one. Purely local — no network cost.
+- **Check the clock itself** if this recurs: `timedatectl` on the Pi should report `System clock synchronized: yes` and `NTP service: active`. The app follows the clock; it can't fix a clock that never syncs.
 
 ### ✅ Solved: Chromium and Epiphany both fail as kiosk browsers on 512 MB
 

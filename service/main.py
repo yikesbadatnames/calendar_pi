@@ -1,9 +1,9 @@
 """Main loop for calendar_pi.
 
-Owns view state (anchor date + month/week mode), schedules 60s ICS refetches,
-and wires the three kiosk buttons to state mutations. tkinter runs the UI on
-the main thread; gpiozero callbacks fire on background threads and hop back
-onto the main thread via root.after(0, ...).
+Owns view state (anchor date + month/week mode), schedules periodic ICS
+refetches, and wires the three kiosk buttons to state mutations. tkinter runs
+the UI on the main thread; gpiozero callbacks fire on background threads and
+hop back onto the main thread via root.after(0, ...).
 """
 
 from __future__ import annotations
@@ -16,10 +16,21 @@ from datetime import date, timedelta
 
 import tkinter as tk
 
-from calendar_client import Event, get_events
+from calendar_client import CalendarFetchError, Event, get_events
 from renderer import MonthView, WeekView
 
-REFRESH_MS = 60_000
+# Normal refresh cadence. A wall calendar doesn't need minute-level freshness,
+# and every refetch is a full ICS download over the Pi's wifi — 5 minutes is
+# plenty for "someone added a thing on their phone".
+REFRESH_MS = 300_000
+
+# After a failed/degraded refresh, retry sooner than the normal cadence so a
+# transient wifi blip doesn't leave stale data up for a full 5 minutes.
+RETRY_MS = 60_000
+
+# How often to re-read the system clock. Cheap (no network) and only redraws
+# when the date actually changes — see _clock_tick for why this exists at all.
+CLOCK_TICK_MS = 10_000
 
 # Minimum time between accepted key actions. Key autorepeat (holding a key down)
 # and mashing both fire far faster than this; anything sooner than the interval
@@ -109,7 +120,10 @@ class App:
         # Timestamp of the last accepted key action, for input throttling.
         self._last_action_t = 0.0
 
-        self.anchor = date.today().replace(day=1)
+        # The date the UI currently believes it is. Tracked separately from
+        # date.today() so _clock_tick can spot the moment they diverge.
+        self._today = date.today()
+        self.anchor = self._today.replace(day=1)
         self.events: list[Event] = []
         # (inclusive_start, exclusive_end) of the events we currently hold.
         # None until the first successful fetch.
@@ -135,6 +149,7 @@ class App:
         # subsequent refreshes are timer-driven.
         self._refetch_window_and_redraw()
         self.root.after(REFRESH_MS, self._periodic_refresh)
+        self.root.after(CLOCK_TICK_MS, self._clock_tick)
 
     @property
     def view(self):
@@ -160,7 +175,9 @@ class App:
     def _hide_status(self) -> None:
         self.status.place_forget()
 
-    def _refetch_window_and_redraw(self) -> None:
+    def _refetch_window_and_redraw(self) -> bool:
+        """Fetch the window around the anchor and redraw. Returns False if the
+        fetch was degraded, so the caller can retry sooner."""
         window_start, window_end = self._window_for(self.anchor)
         # Paint the badge BEFORE the blocking fetch. get_events runs on this (UI)
         # thread, so nothing repaints until it returns; update_idletasks flushes
@@ -173,8 +190,20 @@ class App:
             self.events = get_events(window_start, window_end)
             self.window_start = window_start
             self.window_end = window_end
+        except CalendarFetchError as e:
+            # At least one feed failed. Whatever came back is incomplete, so we
+            # must NOT overwrite good data with it — that's how the display
+            # blanks out on a wifi blip. The exception is a cold start: an
+            # incomplete calendar still beats an empty one.
+            ok = False
+            print(f"calendar fetch degraded: {e}", file=sys.stderr)
+            if self.window_start is None:
+                self.events = e.partial
+                self.window_start = window_start
+                self.window_end = window_end
         except Exception:
-            # Keep whatever we had on screen; log and move on.
+            # Config/parse error, or something else unexpected. Keep whatever
+            # we had on screen; log and move on.
             ok = False
             print("calendar fetch failed:", file=sys.stderr)
             traceback.print_exc()
@@ -183,13 +212,49 @@ class App:
             self._hide_status()
         else:
             # Distinct message so a failed refresh doesn't masquerade as a good
-            # one; auto-clears, and the 60s timer will retry on its own.
+            # one; auto-clears, and the retry timer picks it up on its own.
             self._show_status("⚠ refresh failed — will retry")
             self.root.after(4000, self._hide_status)
+        return ok
 
     def _periodic_refresh(self) -> None:
-        self._refetch_window_and_redraw()
-        self.root.after(REFRESH_MS, self._periodic_refresh)
+        ok = self._refetch_window_and_redraw()
+        self.root.after(REFRESH_MS if ok else RETRY_MS, self._periodic_refresh)
+
+    def _home_anchor_for(self, day: date) -> date:
+        """The anchor we'd show for `day` if nobody had navigated: that day's
+        month in month mode, that day's week in week mode."""
+        if self.view_mode == "month":
+            return day.replace(day=1)
+        return day - timedelta(days=day.weekday())
+
+    def _clock_tick(self) -> None:
+        """Follow the system clock when it moves.
+
+        The Pi Zero has no battery-backed RTC. At boot the clock is whatever
+        fake-hwclock last saved — often years stale — and it only jumps to the
+        real time once wifi is up and NTP syncs, which is typically *after*
+        this app has started and already anchored itself. Reading date.today()
+        once in __init__ meant the kiosk stayed stuck on that bogus date
+        forever. Re-checking here also handles the ordinary case: midnight
+        rollover, where the today-highlight (and possibly the month) moves.
+
+        If the user has navigated away from today, we leave their anchor alone
+        and just redraw so the highlight lands correctly.
+        """
+        today = date.today()
+        if today != self._today:
+            was_home = self.anchor == self._home_anchor_for(self._today)
+            print(f"system date moved {self._today} → {today}", file=sys.stderr)
+            self._today = today
+            if was_home:
+                # _navigate_to refetches only if the new span falls outside the
+                # cached window — which it will after a big NTP correction, and
+                # won't for a plain midnight rollover.
+                self._navigate_to(self._home_anchor_for(today))
+            else:
+                self.view.draw(self.anchor, self.events)
+        self.root.after(CLOCK_TICK_MS, self._clock_tick)
 
     def _navigate_to(self, new_anchor: date) -> None:
         """Change the anchor. Refetches only if the visible span extends
@@ -227,15 +292,18 @@ class App:
         old_view = self.view
         if self.view_mode == "month":
             self.view_mode = "week"
-            today = date.today()
+            today = self._today
             ref = today if (self.anchor.year, self.anchor.month) == (today.year, today.month) else self.anchor
-            self.anchor = ref - timedelta(days=ref.weekday())
+            new_anchor = ref - timedelta(days=ref.weekday())
         else:
             self.view_mode = "month"
-            self.anchor = self.anchor.replace(day=1)
+            new_anchor = self.anchor.replace(day=1)
         old_view.frame.pack_forget()
         self.view.frame.pack(fill="both", expand=True)
-        self.view.draw(self.anchor, self.events)
+        # Via _navigate_to rather than draw() directly: week → month widens the
+        # visible span, which can reach past the cached window and would
+        # otherwise render a month with events missing off its edge.
+        self._navigate_to(new_anchor)
 
     def _on_key(self, action) -> None:
         """Throttle keyboard input. Drops any press arriving within
