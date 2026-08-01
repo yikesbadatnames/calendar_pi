@@ -12,7 +12,7 @@ import socket
 import sys
 import time
 import traceback
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import tkinter as tk
 
@@ -31,6 +31,15 @@ RETRY_MS = 60_000
 # How often to re-read the system clock. Cheap (no network) and only redraws
 # when the date actually changes — see _clock_tick for why this exists at all.
 CLOCK_TICK_MS = 10_000
+
+# Consecutive imperfect refreshes before a low-key "stale" badge escalates to a
+# warning. One or two feeds briefly serving cached data is routine on Pi wifi
+# and shouldn't look like a fault; several minutes of it is worth noticing.
+FAILURE_BADGE_THRESHOLD = 3
+
+# Badge colors: informational (matches the today-cell blue) vs. warning.
+STATUS_BG_INFO = "#1e2a3a"
+STATUS_BG_WARN = "#5a2a2a"
 
 # Minimum time between accepted key actions. Key autorepeat (holding a key down)
 # and mashing both fire far faster than this; anything sooner than the interval
@@ -130,6 +139,12 @@ class App:
         self.window_start: date | None = None
         self.window_end: date | None = None
 
+        # Refresh health, for the status badge. _last_success is the last time
+        # every feed came back fresh, so the badge can say how far behind we are
+        # rather than just that something went wrong a moment ago.
+        self._last_success: datetime | None = None
+        self._consecutive_failures = 0
+
         # Both views live for the whole app lifetime; toggle_view swaps which
         # one is packed. This is cheaper than destroy/rebuild and preserves
         # per-view state (e.g. the WeekView's cached canvas contents).
@@ -141,7 +156,7 @@ class App:
         # reads as "working" not "frozen". Uses place() (not pack/grid) so it
         # floats over whichever view is active without touching their layout.
         self.status = tk.Label(
-            root, text="", bg="#1e2a3a", fg="#ffffff",
+            root, text="", bg=STATUS_BG_INFO, fg="#ffffff",
             font=("Helvetica", 11, "bold"), padx=10, pady=4,
         )
 
@@ -167,13 +182,40 @@ class App:
             return _advance_months(self.anchor, 1)
         return self.anchor + timedelta(days=7)
 
-    def _show_status(self, text: str) -> None:
-        self.status.config(text=text)
+    def _show_status(self, text: str, bg: str = STATUS_BG_INFO) -> None:
+        self.status.config(text=text, bg=bg)
         self.status.place(relx=1.0, rely=0.0, x=-12, y=12, anchor="ne")
         self.status.lift()
 
     def _hide_status(self) -> None:
         self.status.place_forget()
+
+    def _update_status_badge(self, ok: bool, stale: list[str], failed: list[str]) -> None:
+        """Reflect refresh health in the corner badge.
+
+        The badge now persists until a clean refresh instead of flashing for
+        four seconds. A warning you missed is a warning that never happened —
+        on a wall calendar you need to be able to glance up ten minutes later
+        and still see that what you're reading is behind.
+        """
+        if ok:
+            self._hide_status()
+            return
+        last = self._last_success.strftime("%H:%M") if self._last_success else "never"
+        if failed:
+            self._show_status(
+                f"⚠ {', '.join(failed)} unavailable · last ok {last}", STATUS_BG_WARN
+            )
+            return
+        names = ", ".join(stale) or "refresh"
+        if self._consecutive_failures >= FAILURE_BADGE_THRESHOLD:
+            # Same words, louder styling: it's been stale long enough that this
+            # is no longer a blip, but the data on screen is still that feed's.
+            self._show_status(f"⚠ {names} stale · last ok {last}", STATUS_BG_WARN)
+        else:
+            # Cached data is on screen and it's recent. Worth saying, not worth
+            # alarming about — this is the expected shape of a brief wifi blip.
+            self._show_status(f"⟳ {names} stale · last ok {last}")
 
     def _refetch_window_and_redraw(self) -> bool:
         """Fetch the window around the anchor and redraw. Returns False if the
@@ -186,35 +228,51 @@ class App:
         self._show_status("Updating…")
         self.root.update_idletasks()
         ok = True
+        stale: list[str] = []
+        failed: list[str] = []
         try:
-            self.events = get_events(window_start, window_end)
-            self.window_start = window_start
-            self.window_end = window_end
-        except CalendarFetchError as e:
-            # At least one feed failed. Whatever came back is incomplete, so we
-            # must NOT overwrite good data with it — that's how the display
-            # blanks out on a wifi blip. The exception is a cold start: an
-            # incomplete calendar still beats an empty one.
-            ok = False
-            print(f"calendar fetch degraded: {e}", file=sys.stderr)
-            if self.window_start is None:
-                self.events = e.partial
+            res = get_events(window_start, window_end)
+            stale, failed = res.stale_feeds, res.failed_feeds
+            if failed and self.window_start is not None:
+                # A feed returned nothing and had no cache to fall back on, so
+                # this merge is genuinely missing someone's calendar. We already
+                # have something on screen — keep it rather than dropping a
+                # person's events. (On a cold start we take it anyway: a partial
+                # calendar still beats a blank one.)
+                ok = False
+                print(
+                    f"keeping current view; no data for {', '.join(failed)}",
+                    file=sys.stderr,
+                )
+            else:
+                self.events = res.events
                 self.window_start = window_start
                 self.window_end = window_end
-        except Exception:
-            # Config/parse error, or something else unexpected. Keep whatever
-            # we had on screen; log and move on.
+                # Stale counts as not-ok so the 60s retry timer kicks in and we
+                # get back to fresh data sooner than the 5-minute cadence.
+                ok = res.ok
+        except CalendarFetchError as e:
+            # config.json is missing or malformed. Retrying won't fix it, but we
+            # keep the timer running so repairing the file recovers the kiosk
+            # without needing a restart.
             ok = False
+            failed = ["config.json"]
+            print(f"calendar config error: {e}", file=sys.stderr)
+        except Exception:
+            # Something unexpected. Keep whatever we had on screen; log and move on.
+            ok = False
+            failed = ["calendar"]
             print("calendar fetch failed:", file=sys.stderr)
             traceback.print_exc()
-        self.view.draw(self.anchor, self.events)
+
         if ok:
-            self._hide_status()
+            self._last_success = datetime.now()
+            self._consecutive_failures = 0
         else:
-            # Distinct message so a failed refresh doesn't masquerade as a good
-            # one; auto-clears, and the retry timer picks it up on its own.
-            self._show_status("⚠ refresh failed — will retry")
-            self.root.after(4000, self._hide_status)
+            self._consecutive_failures += 1
+
+        self.view.draw(self.anchor, self.events)
+        self._update_status_badge(ok, stale, failed)
         return ok
 
     def _periodic_refresh(self) -> None:
