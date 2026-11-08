@@ -20,17 +20,17 @@ from calendar_client import CalendarFetchError, Event, get_events
 from renderer import MonthView, WeekView
 
 # Normal refresh cadence. A wall calendar doesn't need minute-level freshness,
-# and every refetch is a full ICS download over the Pi's wifi — 5 minutes is
+# and every refetch is a full ICS download over the Pi's wifi — 6 hours is
 # plenty for "someone added a thing on their phone".
-REFRESH_MS = 300_000
+REFRESH_MS = 21_600_000
 
 # After a failed/degraded refresh, retry sooner than the normal cadence so a
 # transient wifi blip doesn't leave stale data up for a full 5 minutes.
-RETRY_MS = 60_000
+RETRY_MS = 600_000
 
 # How often to re-read the system clock. Cheap (no network) and only redraws
 # when the date actually changes — see _clock_tick for why this exists at all.
-CLOCK_TICK_MS = 10_000
+CLOCK_TICK_MS = 600_000
 
 # Consecutive imperfect refreshes before a low-key "stale" badge escalates to a
 # warning. One or two feeds briefly serving cached data is routine on Pi wifi
